@@ -1,21 +1,24 @@
+# app.py
+# Updated with PDF support
+
 import streamlit as st
 from PIL import Image
 from preprocessor import preprocess
-from ocr_engine import extract_text, extract_text_from_path
-from translator import translate_text, full_pipeline
+from ocr_engine import extract_text
+from translator import translate_text
+from pdf_handler import pdf_to_images, get_pdf_page_count
 import tempfile
 import os
 
-# ── Page config — must be FIRST streamlit command ──────
+# ── Page config ────────────────────────────────────────
 st.set_page_config(
     page_title="Indian Language OCR Tool",
     page_icon="🌏",
     layout="wide"
 )
 
-# ── App title ──────────────────────────────────────────
 st.title("🌏 Indian Language OCR & Translator")
-st.markdown("Extract and translate text from Indian language images")
+st.markdown("Extract and translate text from Indian language images and PDFs")
 st.divider()
 
 # ── Sidebar ────────────────────────────────────────────
@@ -40,102 +43,203 @@ with st.sidebar:
     )
 
     st.divider()
-    st.markdown("### 📖 About")
-    st.markdown(
-        "This tool extracts text from images "
-        "in Indian regional languages and "
-        "translates it to your chosen language."
-    )
-# ── Main area ──────────────────────────────────────────
+    st.markdown("### 📖 Supported Formats")
+    st.markdown("✅ JPG / JPEG\n\n✅ PNG\n\n✅ PDF (multi-page)")
+
+# ── File Upload — now accepts PDF too ──────────────────
 uploaded_file = st.file_uploader(
-    "Upload an image",
-    type=["jpg", "jpeg", "png"],
-    help="Upload any image containing Indian language text"
+    "Upload an image or PDF",
+    type=["jpg", "jpeg", "png", "pdf"],
+    help="Upload any image or PDF containing Indian language text"
 )
 
 if uploaded_file is not None:
 
-    # Show original image
-    col1, col2 = st.columns(2)
+    file_type = uploaded_file.name.split(".")[-1].lower()
+    is_pdf = file_type == "pdf"
 
-    with col1:
-        st.subheader("📷 Original Image")
-        image = Image.open(uploaded_file)
-        st.image(image, use_column_width=True)
-        st.caption(f"Size: {image.width} x {image.height} pixels")
+    # ── PDF handling ───────────────────────────────────
+    if is_pdf:
+        st.info(f"📄 PDF uploaded: **{uploaded_file.name}**")
 
-    # Save uploaded file temporarily so OpenCV can read it
-    # (OpenCV needs a file path, not a file object)
-    with tempfile.NamedTemporaryFile(
-        delete=False, suffix=".jpg"
-    ) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = tmp.name
-# ── Process button ─────────────────────────────────
-    if st.button("🔍 Extract & Translate", type="primary"):
+        pdf_bytes = uploaded_file.read()
 
-        with st.spinner("Processing... this may take a few seconds"):
+        # Count pages instantly using pypdf
+        with st.spinner("Reading PDF..."):
+            from pdf_handler import get_pdf_page_count
+            total_pages = get_pdf_page_count(pdf_bytes)
 
-            # Preprocess
-            cleaned = preprocess(tmp_path)
+        if total_pages:
+            st.markdown(f"**Total pages found: {total_pages}**")
+        else:
+            st.markdown("**Page count unavailable — enter range manually**")
+            total_pages = 999
 
-            # Show preprocessed if checkbox is on
-            if show_preprocessed:
+        # Page range selector
+        col_a, col_b = st.columns(2)
+        with col_a:
+            start_page = st.number_input(
+                "From page", min_value=1,
+                max_value=total_pages, value=1
+            )
+        with col_b:
+            end_page = st.number_input(
+                "To page", min_value=1,
+                max_value=total_pages, value=min(3, total_pages)
+            )
+
+        # Warn if too many pages selected
+        pages_selected = end_page - start_page + 1
+        if pages_selected > 10:
+            st.warning(
+                f"⚠️ You selected {pages_selected} pages. "
+                "Processing more than 10 pages may be slow. "
+                "Consider processing in smaller batches."
+            )
+
+        if st.button("🔍 Extract & Translate PDF", type="primary"):
+
+            with st.spinner("Converting PDF pages to images..."):
+                from pdf_handler import pdf_to_images
+                pages = pdf_to_images(
+                    pdf_bytes=pdf_bytes,
+                    start_page=int(start_page),
+                    end_page=int(end_page)
+                )
+
+            if not pages:
+                st.error("❌ Could not convert PDF. Check if file is corrupted.")
+            else:
+                all_extracted = []
+                all_translated = []
+
+                progress = st.progress(0)
+                status = st.empty()
+
+                for i, page_img in enumerate(pages):
+                    status.text(
+                        f"Processing page "
+                        f"{start_page + i}/{end_page}..."
+                    )
+
+                    import tempfile, os
+                    with tempfile.NamedTemporaryFile(
+                        delete=False, suffix=".jpg"
+                    ) as tmp:
+                        page_img.save(tmp.name, "JPEG")
+                        tmp_path = tmp.name
+
+                    cleaned = preprocess(tmp_path)
+                    extracted = extract_text(cleaned, ocr_language)
+                    translated = translate_text(extracted, target_language)
+
+                    all_extracted.append(
+                        f"--- Page {int(start_page) + i} ---\n{extracted}"
+                    )
+                    all_translated.append(
+                        f"--- Page {int(start_page) + i} ---\n{translated}"
+                    )
+
+                    os.unlink(tmp_path)
+                    progress.progress((i + 1) / len(pages))
+
+                status.text("✅ All pages processed!")
+
+                # Results
+                st.divider()
+                col1, col2 = st.columns(2)
+                full_extracted = "\n\n".join(all_extracted)
+                full_translated = "\n\n".join(all_translated)
+
                 with col1:
-                    st.subheader("🔧 Preprocessed Image")
-                    st.image(cleaned, use_column_width=True)
+                    st.subheader(f"📝 Extracted ({ocr_language})")
+                    st.text_area("", full_extracted, height=400)
 
-            # OCR
-            extracted = extract_text(cleaned, ocr_language)
+                with col2:
+                    st.subheader(f"🌐 Translated ({target_language})")
+                    st.text_area("", full_translated, height=400)
 
-            # Translate
-            translated = translate_text(extracted, target_language)
+                # Metrics
+                st.divider()
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric("Pages Processed", len(pages))
+                with m2:
+                    st.metric("Words Extracted", len(full_extracted.split()))
+                with m3:
+                    st.metric("Characters", len(full_extracted))
 
-        # ── Show results ───────────────────────────────
-        with col2:
-            st.subheader("📝 Extracted Text")
-            st.text_area(
-                f"Text in {ocr_language}",
-                extracted,
-                height=250
+                # Download
+                output = f"EXTRACTED ({ocr_language}):\n{full_extracted}\n\nTRANSLATED ({target_language}):\n{full_translated}"
+                st.download_button(
+                    "📥 Download Results as TXT",
+                    data=output,
+                    file_name="ocr_results.txt",
+                    mime="text/plain",
+                    key="pdf_download"
+                )
+
+    # ── Image handling ─────────────────────────────────
+    else:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.subheader("📷 Original Image")
+            image = Image.open(uploaded_file)
+            st.image(image, use_column_width=True)
+            st.caption(f"Size: {image.width} x {image.height} px")
+
+        with tempfile.NamedTemporaryFile(
+            delete=False, suffix=".jpg"
+        ) as tmp:
+            tmp.write(uploaded_file.getvalue())
+            tmp_path = tmp.name
+
+        if st.button("🔍 Extract & Translate", type="primary", key="img_btn"):
+
+            with st.spinner("Processing..."):
+                cleaned = preprocess(tmp_path)
+
+                if show_preprocessed:
+                    with col1:
+                        st.subheader("🔧 Preprocessed")
+                        st.image(cleaned, use_column_width=True)
+
+                extracted = extract_text(cleaned, ocr_language)
+                translated = translate_text(extracted, target_language)
+
+            with col2:
+                st.subheader("📝 Extracted Text")
+                st.text_area(
+                    f"Text in {ocr_language}",
+                    extracted, height=250
+                )
+                st.subheader("🌐 Translated Text")
+                st.text_area(
+                    f"Translation in {target_language}",
+                    translated, height=250
+                )
+
+            st.divider()
+            m1, m2, m3 = st.columns(3)
+            with m1:
+                st.metric("Words", len(extracted.split()))
+            with m2:
+                st.metric("Characters", len(extracted))
+            with m3:
+                st.metric("Lines", len(extracted.splitlines()))
+
+            output = f"EXTRACTED ({ocr_language}):\n{extracted}\n\nTRANSLATED ({target_language}):\n{translated}"
+            st.download_button(
+                "📥 Download Results as TXT",
+                data=output,
+                file_name="ocr_results.txt",
+                mime="text/plain",
+                key="img_download"
             )
 
-            st.subheader("🌐 Translated Text")
-            st.text_area(
-                f"Translation in {target_language}",
-                translated,
-                height=250
-            )
+        os.unlink(tmp_path)
 
-        # ── Metrics row ────────────────────────────────
-        st.divider()
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            word_count = len(extracted.split())
-            st.metric("Words Extracted", word_count)
-        with m2:
-            char_count = len(extracted)
-            st.metric("Characters", char_count)
-        with m3:
-            line_count = len(extracted.splitlines())
-            st.metric("Lines", line_count)
-
-        # ── Download button ────────────────────────────
-        st.divider()
-        output = f"EXTRACTED ({ocr_language}):\n{extracted}\n\nTRANSLATED ({target_language}):\n{translated}"
-
-        st.download_button(
-            label="📥 Download Results as TXT",
-            data=output,
-            file_name="ocr_results.txt",
-            mime="text/plain"
-        )
-
-    # Cleanup temp file
-    os.unlink(tmp_path)
 # ── Footer ─────────────────────────────────────────────
 st.divider()
-st.markdown(
-    "Built with Python • Tesseract OCR • "
-    "Google Translate • Streamlit"
-)    
+st.markdown("Built with Python • Tesseract OCR • Google Translate • Streamlit")
