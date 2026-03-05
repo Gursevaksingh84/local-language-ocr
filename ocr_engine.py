@@ -22,7 +22,7 @@ def extract_text(image, language="Hindi"):
     lang_code = LANGUAGES.get(language, "hin")
 
     # config tells Tesseract HOW to read the image
-    config = "--oem 3 --psm 6"
+    config = "--oem 3 --psm 6 -c preserve_interword_spaces=1"
 
     text = pytesseract.image_to_string(
         image,
