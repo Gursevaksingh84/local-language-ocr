@@ -1,0 +1,10 @@
+streamlit
+pytesseract
+pillow
+opencv-python-headless
+googletrans==4.0.0rc1
+langdetect
+pandas
+numpy
+pdf2image
+pypdf
