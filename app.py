@@ -2,8 +2,8 @@
 
 import streamlit as st
 from PIL import Image
-from preprocessor import preprocess
-from ocr_engine import extract_text
+from preprocessor import preprocess_for_gurmukhi as preprocess
+from ocr_engine import extract_text, gurmukhi_postprocess
 from translator import translate_text
 from pdf_handler import pdf_to_images, get_pdf_page_count
 import tempfile, os, time
@@ -681,7 +681,7 @@ if uploaded is not None:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as t:
                         pg.save(t.name, "JPEG"); tp = t.name
                     cleaned    = preprocess(tp)
-                    extracted  = extract_text(cleaned, ocr_lang)
+                    extracted  = extract_text(cleaned, ocr_lang, psm=6)
                     translated = translate_text(extracted, tgt_lang)
                     ext_all.append(f"━━ Page {int(s_pg)+i} ━━\n{extracted}")
                     trs_all.append(f"━━ Page {int(s_pg)+i} ━━\n{translated}")
@@ -803,7 +803,8 @@ if uploaded is not None:
                             st.markdown('<div class="panel-label" style="margin-top:0.9rem;">🔧 Preprocessed</div>', unsafe_allow_html=True)
                             st.image(res["cleaned"], use_container_width=True)
                 elif i == 1:
-                    res["extracted"]  = extract_text(res["cleaned"], ocr_lang)
+                    psm = 6 if ocr_lang != "Punjabi" else 6   # PSM 6 for all; extend here if needed
+                    res["extracted"] = extract_text(res["cleaned"], ocr_lang, psm=psm)
                 elif i == 2:
                     res["translated"] = translate_text(res["extracted"], tgt_lang)
                 time.sleep(0.25)
