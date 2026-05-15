@@ -81,42 +81,64 @@ def gurmukhi_postprocess(text: str) -> str:
     - Collapse multiple spaces to single space
     """
 
-    # 1. Unicode NFC normalization
-    #    Fixes decomposed subjoined consonants that Tesseract sometimes outputs
-    #    as separate code points instead of precomposed sequences.
+    GUR = r'[\u0A00-\u0A7F]'
+
+    # 1. Unicode NFC normalization — fixes decomposed subjoined consonants
     text = unicodedata.normalize('NFC', text)
 
-    # 2. Remove underscore artifacts at word boundaries within Gurmukhi text
-    #    Pattern: underscore immediately before or after a Gurmukhi character
-    GUR = r'[\u0A00-\u0A7F]'
+    # 2. Fix Ik Onkar (ੴ) — Tesseract consistently misreads this symbol
+    #    as "4ਓਂ", "੧ਓਂ", "੧ਓ" etc. at the start of granth pages.
+    text = re.sub(r'^[4੧੧੧]ਓ[ਂ]?\s*[\'`]?\s*', 'ੴ ', text, flags=re.MULTILINE)
+
+    # 3. Fix ਪ੍ਰਸ਼ਾਦਿ → ਪ੍ਰਸਾਦਿ (extra nukta on ਸ is a common OCR error)
+    text = text.replace('ਪ੍ਰਸ਼ਾਦਿ', 'ਪ੍ਰਸਾਦਿ')
+
+    # 4. Fix (ਰਬਾਰਧ/ / (ਊਰਬਾਰਧ) → (ਪੂਰਬਾਰਧ)  — Purbardh section label
+    text = re.sub(r'\(([ਊਊਉ]?ਰਬਾਰਧ)[/)]', '(ਪੂਰਬਾਰਧ)', text)
+
+    # 5. Fix section number "4." at line start → "੧." (Gurmukhi numeral)
+    text = re.sub(r'^4\.', '੧.', text, flags=re.MULTILINE)
+
+    # 6. Fix poem/verse label misreads
+    text = text.replace('ਕਝਿੱਤ', 'ਕਵਿੱਤ')   # Kavitt verse label
+    text = text.replace('ਕਵਿ-ਸੰਕੋਤਲਾ', 'ਕਵਿ-ਸੰਕੇਤਕਾ')  # section heading
+
+    # 7. Fix ਨੰਗਲ → ਮੰਗਲ (heading label — ਨ/ਮ confusion common in small type)
+    text = re.sub(r'ਨੰਗਲ([/)]?)', r'ਮੰਗਲ\1', text)
+
+    # 8. Fix ਮੰਗਜ਼ → ਮੰਗਲ at section heading end
+    text = text.replace('ਮੰਗਜ਼', 'ਮੰਗਲ')
+
+    # 9. Fix ਇਸ਼ਟ ਦੋਵ → ਇਸ਼ਟ ਦੇਵ  (ਦੋਵ is OCR error for ਦੇਵ)
+    text = text.replace('ਇਸ਼ਟ ਦੋਵ', 'ਇਸ਼ਟ ਦੇਵ')
+
+    # 10. Remove underscore artifacts at word boundaries
     text = re.sub(rf'_(?={GUR})', '', text)
     text = re.sub(rf'(?<={GUR})_', '', text)
-    # Also catch underscore at line start (indentation artifact)
     text = re.sub(r'^\s*_+', '', text, flags=re.MULTILINE)
 
-    # 3. Remove backtick artifacts inside Gurmukhi words
-    text = re.sub(rf'(?<={GUR})`(?={GUR})', '', text)
+    # 11. Remove stray backtick/apostrophe at line start or between Gurmukhi
+    text = re.sub(rf"(?<={GUR})[`'](?={GUR})", '', text)
+    text = re.sub(r"^[`']\s*", '', text, flags=re.MULTILINE)
 
-    # 4. Remove trailing ASCII noise digits/chars at end of Gurmukhi lines
-    #    e.g. "ਧੁੰਦ    1" or "ਧੁੰਦ r" at line end
+    # 12. Remove trailing ASCII noise at end of Gurmukhi lines
     text = re.sub(rf'({GUR}[\u0A00-\u0A7F\s]*?)\s+[1IlLr|]\s*$',
                   r'\1', text, flags=re.MULTILINE)
 
-    # 5. Normalise danda/double-danda variants
+    # 13. Normalise danda/double-danda variants
     text = text.replace('||', '॥')
     text = text.replace('!!', '॥')
 
-    # 6. Collapse multiple whitespace to single space (but preserve newlines)
+    # 14. Collapse multiple spaces per line (preserve newlines)
     text = re.sub(r'[ \t]{2,}', ' ', text)
 
-    # 7. Remove lines that contain NO Gurmukhi characters and consist only of
-    #    ASCII punctuation/noise (e.g. "___-" or "   ---  " from column separators)
+    # 15. Remove pure-noise lines (no Gurmukhi, only ASCII/punct)
     text = re.sub(
         r'^\s*[^\u0A00-\u0A7F\n]*[_\-/]{2,}[^\u0A00-\u0A7F\n]*\s*$',
         '', text, flags=re.MULTILINE
     )
 
-    # 8. Remove completely empty lines (more than 1 blank line → 1 blank line)
+    # 16. Collapse 3+ blank lines → max 1 blank line
     text = re.sub(r'\n{3,}', '\n\n', text)
 
     return text.strip()
@@ -127,7 +149,7 @@ def gurmukhi_postprocess(text: str) -> str:
 def extract_text(
     image: Image.Image,
     language: str = "Punjabi",
-    psm: int = 6,
+    psm: int = 4,
 ) -> str:
     """
     Extract text from a preprocessed PIL Image using Tesseract.
@@ -136,9 +158,10 @@ def extract_text(
         image:    Preprocessed (binarised) PIL Image.
         language: Human-readable language name (see LANGUAGE_MAP).
         psm:      Tesseract page segmentation mode.
-                  6 = uniform block of text (default, best for Granth pages)
-                  4 = single column of variable-size text
-                  3 = fully automatic (use for complex mixed layouts)
+                  4 = single column of variable-size text (default — best for Granth pages
+                      which mix large titles, medium headings, and small body text)
+                  6 = uniform block of text (use for pages with consistent body text only)
+                  3 = fully automatic (use for complex multi-column layouts)
 
     Returns:
         Cleaned extracted text string.

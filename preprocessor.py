@@ -57,39 +57,47 @@ def preprocess_for_gurmukhi(image_input) -> Image.Image:
     #   < 80 DPI  → strong upscale needed (camera photo of book from far away)
     #   80–100    → gentle 1.5x upscale
     #   > 100     → no upscaling; image is fine for Tesseract as-is
+    # --- Step 2: Sharpness check on ORIGINAL image (BEFORE upscaling) ---
+    # CRITICAL: sharpness must be measured now. After Lanczos upscaling,
+    # Laplacian variance drops ~25x due to interpolation smoothing, making
+    # a sharp scan falsely appear blurry and triggering the wrong binarizer.
+    gray_orig = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    lap_var = cv2.Laplacian(gray_orig, cv2.CV_64F).var()
+
+    # --- Step 3: Smart upscale only when genuinely low DPI ---
     est_dpi = estimate_dpi(w)
     if est_dpi < 80:
-        # Very low DPI (e.g. camera photo from distance): upscale to ~240 DPI
-        scale = min(240.0 / est_dpi, 3.0)
-        new_w = int(w * scale)
-        new_h = int(h * scale)
-        img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
-    elif est_dpi < 100:
-        # Marginally low DPI: gentle 1.5x upscale
-        img_cv = cv2.resize(img_cv, (int(w * 1.5), int(h * 1.5)), interpolation=cv2.INTER_LANCZOS4)
-    # else: ≥ 100 DPI equivalent → no upscaling; Tesseract handles it well
+        # Very low DPI (camera photo from distance): upscale to ~285 DPI
+        scale = min(285.0 / est_dpi, 3.5)
+        img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)),
+                            interpolation=cv2.INTER_LANCZOS4)
+    elif est_dpi < 150:
+        # Low-to-moderate DPI (scanned book page ~95–150 DPI): 3x upscale.
+        # Scanned granth pages at this range need 3x to resolve subscript consonants.
+        img_cv = cv2.resize(img_cv, (int(w * 3.0), int(h * 3.0)),
+                            interpolation=cv2.INTER_LANCZOS4)
+    # else: ≥ 150 DPI equivalent (clean screenshot etc.) → no upscaling needed
 
-    # --- Step 2: Grayscale ---
+    # --- Step 4: Grayscale ---
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
 
-    # --- Step 3: CLAHE — fixes yellowed book paper and uneven scan illumination ---
-    # clipLimit=2.0 is conservative; higher values over-contrast and break thin strokes
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    # --- Step 5: CLAHE — fixes yellowed book paper and uneven scan illumination ---
+    # clipLimit=1.5 is conservative; preserves fine Gurmukhi strokes and subscripts
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
     gray = clahe.apply(gray)
 
-    # --- Step 4: Sharpness-adaptive binarization ---
-    lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-
+    # --- Step 6: Sharpness-adaptive binarization ---
+    # Uses lap_var measured in Step 2 (original image — reliable)
     if lap_var >= 400:
-        # Sharp/clean image (screenshot, clean scan): mild denoise + Otsu
-        # h=5 is very light — preserves thin Gurmukhi strokes
-        denoised = cv2.fastNlMeansDenoising(gray, h=5, templateWindowSize=7, searchWindowSize=21)
-        _, binary = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Sharp/clean image: mild denoise + Otsu — preserves thin subjoined strokes
+        denoised = cv2.fastNlMeansDenoising(gray, h=5, templateWindowSize=7,
+                                             searchWindowSize=21)
+        _, binary = cv2.threshold(denoised, 0, 255,
+                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     else:
-        # Blurry/noisy (camera photo, old scan): stronger denoise + adaptive threshold
-        # h=9 removes noise while adaptive threshold handles uneven illumination
-        denoised = cv2.fastNlMeansDenoising(gray, h=9, templateWindowSize=7, searchWindowSize=21)
-        # blockSize=19, C=8: tuned for Gurmukhi text at ~200+ DPI
+        # Blurry/noisy (camera photo, truly old scan): stronger denoise + adaptive threshold
+        denoised = cv2.fastNlMeansDenoising(gray, h=9, templateWindowSize=7,
+                                             searchWindowSize=21)
         binary = cv2.adaptiveThreshold(
             denoised, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
